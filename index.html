@@ -1,0 +1,403 @@
+﻿<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>A-Frame Space Planets</title>
+    <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+    <script src="model_data.js"></script>
+    <script>
+      AFRAME.registerComponent("starfield", {
+        init: function () {
+          var group = document.createElement("a-entity");
+          for (var i = 0; i < 500; i += 1) {
+            var star = document.createElement("a-sphere");
+            var radius = 70;
+            var phi = Math.random() * Math.PI * 2;
+            var costheta = Math.random() * 2 - 1;
+            var theta = Math.acos(costheta);
+            var x = radius * Math.sin(theta) * Math.cos(phi);
+            var y = radius * Math.sin(theta) * Math.sin(phi);
+            var z = radius * Math.cos(theta);
+
+            star.setAttribute("position", x + " " + y + " " + z);
+            star.setAttribute("radius", 0.06 + Math.random() * 0.06);
+            star.setAttribute("color", "#fbd13c");
+            star.setAttribute("material", "shader: flat; emissive: #ffffff; emissiveIntensity: 1;");
+            group.appendChild(star);
+          }
+          this.el.appendChild(group);
+        },
+      });
+
+      // ── 파티클 폭발 컴포넌트 ──
+      AFRAME.registerComponent("click-explode", {
+        init: function () {
+          var self = this;
+          this.el.addEventListener("click", function () {
+            self.explode();
+          });
+        },
+        explode: function () {
+          var pos = this.el.object3D.getWorldPosition(new THREE.Vector3());
+          var scene = this.el.sceneEl;
+          var colors = ["#ff6b6b", "#ffd93d", "#6bcbf7", "#c77dff", "#ffffff", "#ff9f43"];
+          for (var i = 0; i < 30; i++) {
+            (function (idx) {
+              var particle = document.createElement("a-sphere");
+              var r = 0.06 + Math.random() * 0.1;
+              var color = colors[Math.floor(Math.random() * colors.length)];
+              var vx = (Math.random() - 0.5) * 4;
+              var vy = (Math.random() - 0.5) * 4;
+              var vz = (Math.random() - 0.5) * 4;
+              particle.setAttribute("radius", r);
+              particle.setAttribute("position", pos.x + " " + pos.y + " " + pos.z);
+              particle.setAttribute("material", "shader: flat; color: " + color + "; emissive: " + color + "; emissiveIntensity: 1.5;");
+              scene.appendChild(particle);
+
+              var start = null;
+              var dur = 800 + Math.random() * 400;
+              function animate(ts) {
+                if (!start) start = ts;
+                var t = (ts - start) / dur;
+                if (t >= 1) {
+                  if (particle.parentNode) particle.parentNode.removeChild(particle);
+                  return;
+                }
+                var ease = 1 - t;
+                particle.setAttribute("position",
+                  (pos.x + vx * t) + " " +
+                  (pos.y + vy * t) + " " +
+                  (pos.z + vz * t)
+                );
+                particle.setAttribute("scale", ease + " " + ease + " " + ease);
+                requestAnimationFrame(animate);
+              }
+              requestAnimationFrame(animate);
+            })(i);
+          }
+        }
+      });
+
+      // ── 클릭 시 조명 색상 변환 컴포넌트 ──
+      AFRAME.registerComponent("click-lightshift", {
+        init: function () {
+          this.colors = [
+            "#fbd13c", // 기본 황금색
+            "#ff6b6b", // 붉은빛
+            "#6bcbf7", // 하늘색
+            "#c77dff", // 보라빛
+            "#4ade80", // 초록빛
+            "#ff9f43", // 주황빛
+          ];
+          this.idx = 0;
+          this.light = document.querySelector("#point-light");
+          var self = this;
+          this.el.addEventListener("click", function () {
+            self.idx = (self.idx + 1) % self.colors.length;
+            var c = self.colors[self.idx];
+            if (self.light) {
+              self.light.setAttribute("light", "type: point; color: " + c + "; intensity: 2.5; distance: 90");
+              // 0.8초 뒤 intensity 원상복귀
+              setTimeout(function () {
+                self.light.setAttribute("light", "type: point; color: " + c + "; intensity: 1.2; distance: 90");
+              }, 800);
+            }
+          });
+        }
+      });
+
+      // ── 마우스 드래그 & 클릭 통합 처리 ──
+      window.addEventListener("DOMContentLoaded", function () {
+        var sceneEl = document.querySelector("a-scene");
+        sceneEl.addEventListener("loaded", function () {
+          var canvas = sceneEl.canvas;
+          var cameraEl = sceneEl.querySelector("a-camera");
+
+          var drag = {
+            active: false,
+            el: null,
+            plane: new THREE.Plane(),
+            intersection: new THREE.Vector3(),
+            startX: 0,
+            startY: 0,
+            moved: false,
+          };
+
+          function getNDC(evt) {
+            var rect = canvas.getBoundingClientRect();
+            return new THREE.Vector2(
+              ((evt.clientX - rect.left) / rect.width) * 2 - 1,
+              -((evt.clientY - rect.top) / rect.height) * 2 + 1
+            );
+          }
+
+          function buildTargetMap() {
+            var clickables = Array.from(sceneEl.querySelectorAll("[data-clickable]"));
+            var targets = [], map = new Map();
+            clickables.forEach(function (el) {
+              if (!el.object3D) return;
+              el.object3D.traverse(function (obj) {
+                if (obj.isMesh) { targets.push(obj); map.set(obj.uuid, el); }
+              });
+            });
+            return { targets: targets, map: map };
+          }
+
+          // ── mousedown: 오브젝트 집으면 드래그 시작 ──
+          canvas.addEventListener("mousedown", function (evt) {
+            if (evt.button !== 0) return;
+            var rc = new THREE.Raycaster();
+            rc.setFromCamera(getNDC(evt), sceneEl.camera);
+            var tm = buildTargetMap();
+            var hits = rc.intersectObjects(tm.targets, true);
+            if (hits.length === 0) return;
+
+            var hitEl = tm.map.get(hits[0].object.uuid);
+            if (!hitEl) return;
+
+            // 카메라 회전 잠금
+            cameraEl.setAttribute("look-controls", "enabled", false);
+
+            // 드래그 평면: 카메라 방향에 수직, 오브젝트 위치 통과
+            var camDir = new THREE.Vector3();
+            sceneEl.camera.getWorldDirection(camDir);
+            drag.plane.setFromNormalAndCoplanarPoint(camDir, hits[0].point);
+
+            drag.active = true;
+            drag.el = hitEl;
+            drag.moved = false;
+            drag.startX = evt.clientX;
+            drag.startY = evt.clientY;
+
+            evt.stopPropagation();
+          }, true);
+
+          // ── mousemove: 오브젝트 따라오기 ──
+          window.addEventListener("mousemove", function (evt) {
+            if (!drag.active || !drag.el) return;
+
+            var dx = evt.clientX - drag.startX;
+            var dy = evt.clientY - drag.startY;
+            if (Math.abs(dx) > 4 || Math.abs(dy) > 4) drag.moved = true;
+
+            if (!drag.moved) return;
+
+            var rc = new THREE.Raycaster();
+            rc.setFromCamera(getNDC(evt), sceneEl.camera);
+
+            if (rc.ray.intersectPlane(drag.plane, drag.intersection)) {
+              var parent = drag.el.object3D.parent;
+              var localPos = drag.intersection.clone();
+              parent.worldToLocal(localPos);
+              drag.el.object3D.position.copy(localPos);
+            }
+          });
+
+          // ── mouseup: 놓으면 클릭 이펙트 or 드래그 종료 ──
+          window.addEventListener("mouseup", function (evt) {
+            if (!drag.active) return;
+            if (!drag.moved && drag.el) {
+              drag.el.emit("click"); // 클릭 이펙트 발동
+            }
+            cameraEl.setAttribute("look-controls", "enabled", true);
+            drag.active = false;
+            drag.el = null;
+          });
+
+          // ── 마우스 휠 줌인/줌아웃 ──
+          canvas.addEventListener("wheel", function (evt) {
+            evt.preventDefault();
+            var rigEl = sceneEl.querySelector("#camera-rig");
+            if (!rigEl) return;
+
+            // 카메라가 바라보는 방향으로 이동
+            var camDir = new THREE.Vector3();
+            sceneEl.camera.getWorldDirection(camDir);
+
+            var speed = 0.01;
+            var delta = -evt.deltaY * speed;
+
+            // 최소/최대 이동 제한
+            var pos = rigEl.object3D.position;
+            var next = pos.clone().addScaledVector(camDir, delta);
+
+            // z축 기준으로 너무 멀거나 가깝지 않게 제한 (선택적)
+            rigEl.object3D.position.copy(next);
+          }, { passive: false });
+        });
+      });
+
+      // 3D 모델 자동 로드 및 드래그 앤 드롭 지원
+      window.addEventListener("DOMContentLoaded", function () {
+        var modelEl = document.querySelector("#my-custom-model");
+
+        function applyModel(src) {
+          if (!modelEl) return;
+          modelEl.removeAttribute("gltf-model");
+          modelEl.setAttribute("gltf-model", src);
+        }
+
+        // 1. model_data.js(Base64)가 있으면 file:// 환경에서도 즉시 로드
+        if (window.MY_MODEL_DATA) {
+          applyModel(window.MY_MODEL_DATA);
+        } else {
+          applyModel("model.glb");
+        }
+
+        modelEl.addEventListener("model-loaded", function () {
+          console.log("3D 모델 로드 완료!");
+          var info = document.getElementById("status-info");
+          if (info) {
+            info.style.color = "#4ade80";
+            info.innerText = "3D 모델 표시 중 (클릭해보세요! 💥)";
+          }
+        });
+
+        modelEl.addEventListener("model-error", function (e) {
+          console.error("3D 모델 로드 실패:", e);
+          var info = document.getElementById("status-info");
+          if (info) {
+            info.style.color = "#f87171";
+            info.innerText = "모델 불러오기 실패 (버튼으로 선택해주세요)";
+          }
+        });
+
+        // 2. 화면에 .glb 파일을 끌어다 놓거나 선택하여 변경할 수 있는 기능
+        var fileInput = document.getElementById("glb-picker");
+        if (fileInput) {
+          fileInput.addEventListener("change", function (e) {
+            var file = e.target.files[0];
+            if (file) {
+              var blobUrl = URL.createObjectURL(file);
+              applyModel(blobUrl);
+            }
+          });
+        }
+
+        window.addEventListener("dragover", function (e) {
+          e.preventDefault();
+        });
+        window.addEventListener("drop", function (e) {
+          e.preventDefault();
+          if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+            var file = e.dataTransfer.files[0];
+            var blobUrl = URL.createObjectURL(file);
+            applyModel(blobUrl);
+          }
+        });
+      });
+    </script>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #020617;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- 상태 표시 및 파일 직접 선택 도구 -->
+    <div
+      style="
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        z-index: 999999;
+        background: rgba(15, 23, 42, 0.75);
+        backdrop-filter: blur(8px);
+        color: #f8fafc;
+        padding: 10px 14px;
+        border-radius: 8px;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        font-size: 13px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        border: 1px solid rgba(255,255,255,0.1);
+      "
+    >
+      <div style="font-weight: 600; margin-bottom: 4px;">🪐 3D 모델 상태</div>
+      <div id="status-info" style="color: #38bdf8; margin-bottom: 8px;">모델 불러오는 중...</div>
+      <label
+        style="
+          display: inline-block;
+          background: #3b82f6;
+          color: white;
+          padding: 4px 10px;
+          border-radius: 4px;
+          cursor: pointer;
+          font-size: 12px;
+        "
+      >
+        파일 직접 선택 / 교체
+        <input type="file" id="glb-picker" accept=".glb,.gltf" style="display: none;" />
+      </label>
+      <div style="font-size: 11px; color: #94a3b8; margin-top: 4px;">
+        * 또는 GLB 파일을 화면에 끌어다 놓아도 됩니다.
+      </div>
+    </div>
+
+    <a-scene background="color: #020617">
+      <a-entity starfield></a-entity>
+
+      <a-entity light="type: ambient; color: #667085; intensity: 0.8"></a-entity>
+      <a-entity
+        id="point-light"
+        light="type: point; color: #fbd13c; intensity: 1.2; distance: 90"
+        position="0 6 6"
+      ></a-entity>
+
+      <a-entity id="camera-rig" position="0 1.6 0">
+        <a-camera position="0 0 0"></a-camera>
+
+        <a-entity
+          animation="property: rotation; to: 0 360 0; loop: true; dur: 20000; easing: linear;"
+        >
+          <a-entity
+            id="my-custom-model"
+            position="2.8 0.2 0"
+            scale="2.5 2.5 2.5"
+            animation="property: rotation; to: 0 360 0; loop: true; dur: 12000; easing: linear;"
+            click-explode
+            click-lightshift
+            data-clickable
+          ></a-entity>
+        </a-entity>
+
+        <a-entity
+          rotation="14 0 0"
+          animation="property: rotation; to: 0 360 0; loop: true; dur: 7000; easing: linear;"
+        >
+          <a-sphere
+            position="4.2 -0.1 0"
+            radius="0.52"
+            color="#ACE0AF"
+            material="metalness: 0.2; roughness: 0.55;"
+            animation="property: rotation; to: 0 360 0; loop: true; dur: 3000; easing: linear;"
+            click-explode
+            click-lightshift
+            data-clickable
+          ></a-sphere>
+        </a-entity>
+
+        <a-entity
+          rotation="-10 0 0"
+          animation="property: rotation; to: 0 0 360; loop: true; dur: 9000; easing: linear;"
+        >
+          <a-sphere
+            position="5.6 0.35 0"
+            radius="0.36"
+            color="#a3e635"
+            material="metalness: 0.18; roughness: 0.6;"
+            animation="property: rotation; to: 0 360 0; loop: true; dur: 3800; easing: linear;"
+            click-explode
+            click-lightshift
+            data-clickable
+          ></a-sphere>
+        </a-entity>
+      </a-entity>
+    </a-scene>
+  </body>
+</html>
